@@ -12,6 +12,7 @@ Bridging the gap between raw experience and policy improvement through automatic
 
 ## 🔥 News
 
+- **[03/02/2026]** Due to an accidental misconfiguration, we lost several hundred GitHub stars. If you previously starred this repo, we'd appreciate a re-star ⭐!
 - **[02/23/2026]** We released all the model checkpoints on HuggingFace! Feel free to use them as warm starts for continued RL training.
 - **[02/18/2026]** The code of SkillRL was released!
 - **[02/10/2026]** SkillRL paper was released on [arXiv](https://arxiv.org/abs/2602.08234)!

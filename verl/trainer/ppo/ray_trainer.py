@@ -895,19 +895,25 @@ class RayPPOTrainer:
         )
 
         if new_skills:
-            # 添加到 skill bank
-            added = retrieval_memory.add_skills(new_skills, category='general')
-            print(f"[SkillUpdate] Added {added} new skills to val_envs")
-
-            # 保存更新后的 skills
-            save_dir = self.config.trainer.get('default_local_dir', './outputs')
-            save_path = os.path.join(save_dir, f'updated_skills_step{self.global_steps}.json')
-            retrieval_memory.save_skills(save_path)
-
-            # 同步到训练环境
+            # Add to training envs only.
+            # Do NOT add to val_envs here: skills derived from validation
+            # failures must not be fed back into the validation memory of the
+            # same evaluation cycle — that would create a data-leakage loop
+            # where val scores are inflated by skills specifically targeting
+            # the val set.
             if hasattr(self, 'envs') and hasattr(self.envs, 'retrieval_memory') and self.envs.retrieval_memory:
                 self.envs.retrieval_memory.add_skills(new_skills, category='general')
-                print(f"[SkillUpdate] Synced {len(new_skills)} new skills to training envs")
+                print(f"[SkillUpdate] Added {len(new_skills)} new skills to training envs")
+
+            # Save updated skill bank (from training envs) to disk.
+            train_memory = self.envs.retrieval_memory if (
+                hasattr(self, 'envs') and hasattr(self.envs, 'retrieval_memory')
+                and self.envs.retrieval_memory
+            ) else retrieval_memory
+            save_dir = self.config.trainer.get('default_local_dir', './outputs')
+            save_path = os.path.join(save_dir, f'updated_skills_step{self.global_steps}.json')
+            train_memory.save_skills(save_path)
+            print(f"[SkillUpdate] Saved updated skill bank to {save_path}")
         else:
             print("[SkillUpdate] No new skills generated")
 
@@ -921,14 +927,89 @@ class RayPPOTrainer:
         failed = []
         for inp, out, score in zip(inputs, outputs, scores):
             if score <= 0:  # 失败的 trajectory
-                # 尝试解析 task type
                 task_type = self._detect_task_type_from_input(inp)
+                task_desc = self._extract_task_description(inp)
+                trajectory = self._parse_conversation_to_steps(inp, out)
                 failed.append({
-                    'task': inp[:500],  # 截断
-                    'trajectory': [{'action': out[:500], 'observation': ''}],
+                    'task': task_desc,
+                    'trajectory': trajectory,
                     'task_type': task_type,
                 })
         return failed[:10]  # 限制数量，避免 prompt 过长
+
+    def _extract_task_description(self, inp: str) -> str:
+        """Extract the task description from a full conversation prompt."""
+        import re
+        # Common patterns used in ALFWorld, WebShop, OpenClaw, etc.
+        patterns = [
+            r'(?:Your task is to|Task:|task is to|you need to)[:\s]+(.*?)(?:\n|$)',
+            r'(?:goal|objective)[:\s]+(.*?)(?:\n|$)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, inp, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()[:1000]
+        # Fallback: first user turn (skip system prompt)
+        for marker in ('<|im_start|>user\n', '\nHuman: ', '\nUser: '):
+            idx = inp.find(marker)
+            if idx >= 0:
+                start = idx + len(marker)
+                return inp[start:start + 1000]
+        return inp[:1000]
+
+    def _parse_conversation_to_steps(self, inp: str, out: str) -> list:
+        """
+        Parse a full decoded conversation into a list of trajectory steps.
+
+        Each step is ``{'action': str, 'observation': str}`` where
+        ``observation`` is the environment feedback (user/tool turn) and
+        ``action`` is the agent response (assistant turn).
+
+        Falls back to treating the whole ``inp`` as the initial context when
+        no structured turn markers are found.
+        """
+        import re
+        steps = []
+
+        # --- ChatML / Qwen format -------------------------------------------
+        user_turns = re.findall(
+            r'<\|im_start\|>user\n(.*?)<\|im_end\|>', inp, re.DOTALL
+        )
+        asst_turns = re.findall(
+            r'<\|im_start\|>assistant\n(.*?)<\|im_end\|>', inp, re.DOTALL
+        )
+        if user_turns and asst_turns:
+            for obs, act in zip(user_turns, asst_turns):
+                steps.append({
+                    'action': act.strip()[:1500],
+                    'observation': obs.strip()[:800],
+                })
+            # Final (failed) action has no follow-up observation
+            steps.append({'action': out[:2000], 'observation': ''})
+            return steps
+
+        # --- Human / Assistant format ----------------------------------------
+        user_turns = re.findall(
+            r'(?:Human|User):\s*(.*?)(?=(?:Human|User|Assistant):|$)',
+            inp, re.DOTALL | re.IGNORECASE,
+        )
+        asst_turns = re.findall(
+            r'Assistant:\s*(.*?)(?=(?:Human|User|Assistant):|$)',
+            inp, re.DOTALL | re.IGNORECASE,
+        )
+        if user_turns and asst_turns:
+            for obs, act in zip(user_turns, asst_turns):
+                steps.append({
+                    'action': act.strip()[:1500],
+                    'observation': obs.strip()[:800],
+                })
+            steps.append({'action': out[:2000], 'observation': ''})
+            return steps
+
+        # --- Fallback: treat full inp as initial context ---------------------
+        steps.append({'action': '', 'observation': inp[:3000]})
+        steps.append({'action': out[:2000], 'observation': ''})
+        return steps
 
     def _detect_task_type_from_input(self, inp: str) -> str:
         """从输入中检测任务类型"""

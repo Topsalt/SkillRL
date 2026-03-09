@@ -354,7 +354,17 @@ class SkillsOnlyMemory(BaseMemory):
         # Template mode: keyword detection + return (sub)set of category skills
         # ----------------------------------------------------------------
         task_type = self._detect_task_type(task_description)
-        general_skills = self.skills.get('general_skills', [])[:top_k]
+
+        # Dynamic skills (dyn_NNN) are appended to the *end* of general_skills,
+        # so a naive [:top_k] slice would silently drop all of them once the
+        # static skill bank is larger than top_k.  Fix: always include every
+        # dynamic skill, then fill the remaining budget with static skills.
+        all_general = self.skills.get('general_skills', [])
+        dynamic_skills = [s for s in all_general if s.get('skill_id', '').startswith('dyn_')]
+        static_skills = [s for s in all_general if not s.get('skill_id', '').startswith('dyn_')]
+        n_static = max(0, top_k - len(dynamic_skills))
+        general_skills = dynamic_skills + static_skills[:n_static]
+
         all_task_skills = self.skills.get('task_specific_skills', {}).get(task_type, [])
 
         if self.task_specific_top_k is not None:

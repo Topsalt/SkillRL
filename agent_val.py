@@ -574,16 +574,25 @@ def build_global_actions(num_chrom, num_cls):
 
 def build_action_space_global(env: "ChromosomeEnv", global_actions: list, top_k=None, per_class_k=None):
     """
-    策略：违规驱动 (无 Prototype)
-    使用 Tensor 操作来判断
+    策略：违规驱动 + 过剩驱动 (无 Prototype)
+    在原有违规类基础上，额外加入过剩类（cnt > 2）的位置，
+    支持"先移走过剩染色体再修正其他位置"的间接操作。
+    使用 Tensor 操作来判断。
     """
     num_chrom = env.num_ch
     num_cls = env.num_cls
     
-    # vio 是 Tensor
-    violated_classes = torch.nonzero(env.vio).squeeze(1).tolist()
-    
-    if len(violated_classes) == 0:
+    # violated_classes: vio != 0 的类（数量不符合预期，含缺失和过剩）
+    violated_classes = set(torch.nonzero(env.vio).view(-1).tolist())
+
+    # surplus_classes: 数量超出正常预期（常染色体标准 2 条）的类
+    # 显式加入过剩类，确保 agent 可以把"多余的"染色体先移走
+    surplus_classes = set(torch.nonzero(env.cnt > 2).view(-1).tolist())
+
+    # 合并：允许操作违规类或过剩类的位置
+    action_classes = violated_classes | surplus_classes
+
+    if len(action_classes) == 0:
         return [len(global_actions) - 1] # submit index
 
     allowed = []
@@ -599,7 +608,7 @@ def build_action_space_global(env: "ChromosomeEnv", global_actions: list, top_k=
         pos = pos.item()
         current_label = env.hard_lbl[pos].item()
         
-        if current_label in violated_classes:
+        if current_label in action_classes:
             start_idx = pos * (num_cls + 1)
             end_idx = start_idx + (num_cls + 1)
             allowed.extend(range(start_idx, end_idx))

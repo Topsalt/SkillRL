@@ -574,8 +574,16 @@ def build_global_actions(num_chrom, num_cls):
 
 def build_action_space_global(env: "ChromosomeEnv", global_actions: list, top_k=None, per_class_k=None):
     """
-    策略：违规驱动 (无 Prototype)
+    策略：违规驱动 + 过剩驱动 (无 Prototype)
     使用 Tensor 操作来判断
+
+    允许操作的位置包括两类：
+    1. 违规类 (violated_classes): 当前计数不符合正常核型的染色体类别。
+    2. 过剩类 (surplus_classes): 当前计数超过该类别最低期望值的染色体类别。
+       加入过剩类是为了支持间接操作链，例如先把过剩的 A 移走，再把 B 移回来。
+       - 常染色体 0-21: 期望值 = 2，过剩即 cnt > 2（常染色体过剩也属于违规）。
+       - 性染色体 22 (X): 以男性核型最小值 1 为基准，cnt > 1 视为过剩。
+       - 性染色体 23 (Y): 以女性核型最小值 0 为基准，cnt > 0 视为过剩。
     """
     num_chrom = env.num_ch
     num_cls = env.num_cls
@@ -585,6 +593,17 @@ def build_action_space_global(env: "ChromosomeEnv", global_actions: list, top_k=
     
     if len(violated_classes) == 0:
         return [len(global_actions) - 1] # submit index
+
+    # 计算过剩类 (surplus classes)
+    # 各类别的最低期望计数：常染色体=2，X染色体=1（男性最小值），Y染色体=0（女性无Y）
+    expected = torch.full((num_cls,), 2.0, dtype=env.cnt.dtype, device=env.device)
+    if num_cls > 22:
+        expected[22] = 1.0
+    if num_cls > 23:
+        expected[23] = 0.0
+    surplus_classes = set(torch.nonzero(env.cnt > expected).flatten().tolist())
+
+    active_classes = set(violated_classes) | surplus_classes
 
     allowed = []
     
@@ -599,7 +618,7 @@ def build_action_space_global(env: "ChromosomeEnv", global_actions: list, top_k=
         pos = pos.item()
         current_label = env.hard_lbl[pos].item()
         
-        if current_label in violated_classes:
+        if current_label in active_classes:
             start_idx = pos * (num_cls + 1)
             end_idx = start_idx + (num_cls + 1)
             allowed.extend(range(start_idx, end_idx))
